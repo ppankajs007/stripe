@@ -1,0 +1,158 @@
+        
+        <div class="form-group">
+           <label for="card-element"></label>
+           <div id="card-element"></div>
+           <div id="card-errors" role="alert"></div>
+         </div>
+        
+        
+        // script code strpe
+        
+        
+         var stripe = Stripe('<?= PUBLICKEY ?>');
+
+          // Create an instance of Elements.
+          var elements = stripe.elements();
+
+          // Custom styling can be passed to options when creating an Element.
+          // (Note that this demo uses a wider set of styles than the guide below.)
+          var style = {
+
+              base: {
+                  color: '#32325d',
+                  fontFamily: '"Helvetica Neue", Helvetica, sans-serif',
+                  fontSmoothing: 'antialiased',
+                  fontSize: '16px',
+                  '::placeholder': {
+                      color: '#aab7c4'
+                  }
+              },
+              invalid: {
+                  color: '#fa755a',
+                  iconColor: '#fa755a'
+              }
+          };
+
+          // Create an instance of the card Element.
+          var card = elements.create('card', {hidePostalCode: true,style: style});
+
+          // Add an instance of the card Element into the `card-element` <div>.
+          card.mount('#card-element');
+
+          // Handle real-time validation errors from the card Element.
+          card.addEventListener('change', function(event) {
+              var displayError = document.getElementById('card-errors');
+              if (event.error) {
+                  displayError.textContent = event.error.message;
+              } else {
+                  displayError.textContent = '';
+              }
+          });
+
+          // Handle form submission.
+          var form = document.getElementById('payment-form');
+          form.addEventListener('submit', function(event) {
+              event.preventDefault();
+              $('#upload_cv_btn').html('<div class="box-loader"><div class="loader-13"></div></div>');
+              stripe.createToken(card).then(function(result) {
+                  if (result.error) {
+                      $('#upload_cv_btn').html('Submit');
+                      // Inform the user if there was an error.
+                      var errorElement = document.getElementById('card-errors');
+                      errorElement.textContent = result.error.message;
+                  } else {
+                      // Send the token to your server.
+                      stripeTokenHandler(result.token);
+                  }
+              });
+          });
+
+          // Submit the form with the token ID.
+          function stripeTokenHandler(token) {
+              // Insert the token ID into the form so it gets submitted to the server
+              var form = document.getElementById('payment-form');
+              var hiddenInput = document.createElement('input');
+              hiddenInput.setAttribute('type', 'hidden');
+              hiddenInput.setAttribute('name', 'stripeToken');
+              hiddenInput.setAttribute('value', token.id);
+              form.appendChild(hiddenInput);
+
+              // Submit the form
+              form.submit();
+          }
+
+        
+        // php code
+        
+        if( $_SERVER['REQUEST_METHOD'] == 'POST' ){
+                try {
+                    if( $_POST['qty'] <= 0 || empty($_POST['qty']) ){
+                          SessionFlash::Flash('error','Something wrong please try again');
+                          redirect(url('advertise-job'));
+                    }
+
+                    $keyPrice = intval($_POST['qty']) - 1;
+                    $amount = ADVERTISE_PRICE[$keyPrice]['withDiscount'];
+
+                    \Stripe\Stripe::setApiKey(SECRETKEY);
+                    $details = Client_portalModel::getClientDetail($this->clientId);
+                    $customer_id = $details->stripe_customer_id;
+
+                    if( empty($details->stripe_customer_id) ){
+                        $stripe = new \Stripe\StripeClient(SECRETKEY);
+                        $customer = $stripe->customers->create([
+                          'email' => $details->email,
+                          'name'  => ucfirst($details->firstname)." " .ucfirst($details->lastname),
+                          'phone' => $details->phone,
+                        ]);
+                        $customer_id = $customer->id;
+                        Model::update('clients',['stripe_customer_id' => $customer_id ],"`id` = {$this->clientId}");
+                    }
+
+                    $stripe->customers->createSource(
+                      $customer_id,
+                      ['source' => $_POST['stripeToken']]
+                    );
+
+                    $intent = \Stripe\PaymentIntent::create([
+                      'customer' => $customer_id,
+                      'setup_future_usage' => 'off_session',
+                      'amount' => ($amount * 100),
+                      'currency' => CURRENCY,
+                      'confirm' => true,
+                      'payment_method_data' => [
+                            'type' => 'card',
+                            'card' => ['token' => $_POST['stripeToken']],
+                      ],
+                    ]);
+                    $intent = \Stripe\PaymentIntent::retrieve($intent->id);
+                    $charges = $intent->charges->data;
+                    if( $charges[0]->paid ){
+                        $paidDetails = [
+                          'id'                     => $charges[0]->id,
+                          'client_id'              => $this->clientId,
+                          'job_post'               => ($keyPrice + 1),
+                          'amount'                 => $charges[0]->amount,
+                          'balance_transaction'    => $charges[0]->balance_transaction,
+                          'customer'               => $charges[0]->customer,
+                          'paid'                   => $charges[0]->paid,
+                          'payment_intent'         => $charges[0]->payment_intent,
+                          'payment_method'         => $charges[0]->payment_method,
+                          'payment_method_details' => json_encode($charges[0]->payment_method_details),
+                          'status'                 => $charges[0]->status,
+                        ];
+                        Model::insert('advertise_transaction',$paidDetails);
+                        Advertise_jobModel::addUpdateClientJob($this->clientId,($keyPrice + 1));
+                    }
+                    if( $charges[0]->status == 'succeeded' ){
+                      SessionFlash::Flash('success','Your payment successfully accepted.');
+                      redirect(url('advertise-job'));
+                    }
+                    SessionFlash::Flash('error','Your payment not accepted.Please try again');
+                    redirect(url('advertise-job'));
+                }catch(Exception $e) {
+                  SessionFlash::Flash('error',$e->getMessage());
+                  redirect(url('advertise-job'));
+                }
+
+          }
